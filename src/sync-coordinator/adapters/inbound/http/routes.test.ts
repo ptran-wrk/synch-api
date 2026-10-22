@@ -12,6 +12,7 @@ function appWithStageError(error: SyncAccessApplicationError) {
 	const services = {
 		repairSyncState: unused,
 		readSyncPause: unused,
+		setSyncPause: unused,
 		stageBlob: vi.fn(async () => {
 			throw error;
 		}),
@@ -20,6 +21,7 @@ function appWithStageError(error: SyncAccessApplicationError) {
 		purgeVault: unused,
 		prepareSocketSession: unused,
 		completeSocketOpen: unused,
+		assertSessionAccess: unused,
 	} satisfies CoordinatorHttpServices;
 	return {
 		app: createCoordinatorApp({

@@ -11,11 +11,13 @@ import type { SocketConnectionService } from "./socket-connection-service";
 import type { VaultService } from "./vault-service";
 
 export type CoordinatorApi = CoordinatorApplicationPort & {
+	setSyncPause: VaultService["setSyncPause"];
 	prepareSocketSession(
 		token: string | null | undefined,
 		vaultId: string,
 	): Promise<SocketSession>;
 	completeSocketOpen(): Promise<void>;
+	assertSessionAccess(session: SocketSession): void;
 	readSyncPause(vaultId: string): SyncPauseState | null;
 	detachLocalVault(session: SocketSession): Promise<void>;
 	stageBlob(
@@ -50,9 +52,11 @@ export type CoordinatorApiServices = {
 
 export function bindCoordinatorApi(services: CoordinatorApiServices): CoordinatorApi {
 	return {
+		setSyncPause: (vaultId, reason) => services.vaultService.setSyncPause(vaultId, reason),
 		prepareSocketSession: (token, vaultId) =>
 			services.socketConnectionService.prepareSocketSession(token, vaultId),
 		completeSocketOpen: () => services.socketConnectionService.completeSocketOpen(),
+		assertSessionAccess: (session) => services.socketConnectionService.assertSessionAccess(session),
 		readSyncPause: (vaultId) => services.vaultService.readSyncPause(vaultId),
 		repairSyncState: (vaultId) => services.vaultService.repairSyncState(vaultId),
 		listEntryStates: (session, message) =>

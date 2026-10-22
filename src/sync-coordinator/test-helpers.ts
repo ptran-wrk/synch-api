@@ -163,6 +163,7 @@ export function createMockCoordinatorSocketService(
 ): SocketGateway {
 	return {
 		readSocketSession: vi.fn(() => null),
+		listSocketSessions: vi.fn(() => []),
 		attachSocketSession: vi.fn(),
 		sendSocketMessage: vi.fn(() => true),
 		broadcastStorageStatus: vi.fn(),
@@ -321,7 +322,7 @@ export type TestCoordinatorState = CoordinatorStorageLifecycle &
 
 function createSyncTokenVerifier(): SyncTokenVerifier {
 	return {
-		verifySyncToken: vi.fn(async (_token, vaultId = "vault-1") => ({
+		verifySyncToken: vi.fn<SyncTokenVerifier["verifySyncToken"]>(async (_token, vaultId = "vault-1") => ({
 			sub: "user-1",
 			vaultId,
 			localVaultId: "local-vault-1",

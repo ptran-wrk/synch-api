@@ -1,3 +1,10 @@
+import { LEGACY_PAUSE_QUOTA_COMPATIBILITY } from "../sync-access/domain/legacy-pause-compatibility";
+import { SharingError } from "../sharing/application/types";
+import { DrizzleSharingStore } from "../sharing/adapters/drizzle-sharing-store";
+import { SharingAccess } from "../sharing/application/access";
+import { CoordinatorSyncAccessService, type VerifiedVaultAccess } from "../sync-coordinator/application/services/sync-access-service";
+import { SqliteSyncAccessStore } from "../sync-coordinator/adapters/outbound/sqlite/sync-access-store";
+import { DEFAULT_SYNC_TOKEN_TTL_SECONDS } from "../sync-access/domain/token-policy";
 import { SqliteCoordinatorUnitOfWork } from "../sync-coordinator/adapters/outbound/sqlite/unit-of-work";
 import {
 	isCommunityEdition,
@@ -61,6 +68,7 @@ export type CoordinatorApplicationConfig = {
 	profile: DeploymentProfile;
 	productIdsByPlanId: SubscriptionProductIdsByPlanId;
 	syncTokenSecret: string;
+	syncTokenTtlSeconds?: number;
 	blobGracePeriodMs?: number;
 	cursorActiveTtlMs?: number;
 };
@@ -75,10 +83,7 @@ export function createCoordinatorApplication(
 	const cursorActiveTtlMs =
 		config.cursorActiveTtlMs ?? DEFAULT_CURSOR_ACTIVE_TTL_MS;
 	const unitOfWork = new SqliteCoordinatorUnitOfWork(deps.storageHandle);
-	const {
-		state: cursorStore,
-		connections,
-	} = unitOfWork.stores;
+	const { state: cursorStore, connections } = unitOfWork.stores;
 	const healthStore = new CoordinatorHealthStore(
 		deps.storageHandle,
 		deps.socketCounter,
@@ -89,8 +94,36 @@ export function createCoordinatorApplication(
 	});
 	const vaultOrganizationReader = createVaultOrganizationReader(deps.db);
 	const syncStatusRepository = new VaultSyncStatusRepository(deps.db);
+	const sharingStore = new DrizzleSharingStore(deps.db);
+	const sharingAccess = new SharingAccess(sharingStore, subscriptionFeature.policyReader);
+	const syncAccess = new CoordinatorSyncAccessService(
+		new SqliteSyncAccessStore(deps.storageHandle),
+		deps.socketGateway,
+		async (vaultId) => {
+			const vault = await sharingStore.vault(vaultId);
+			if (!vault) throw new Error("Vault not found while refreshing sync access");
+			return {
+				grants: await sharingStore.accessVersions(vaultId),
+				suspended: await sharingAccess.isSuspended(vaultId),
+			};
+		},
+		Math.max(
+			DEFAULT_SYNC_TOKEN_TTL_SECONDS,
+			config.syncTokenTtlSeconds ?? DEFAULT_SYNC_TOKEN_TTL_SECONDS,
+		) * 1000,
+		() => {
+			if (!LEGACY_PAUSE_QUOTA_COMPATIBILITY && cursorStore.readSyncPause()) {
+				throw new SharingError(503, "sync_paused", "vault sync is temporarily paused for repair");
+			}
+		},
+	);
 	const syncTokenFeature = createSyncTokenFeature({
 		syncTokenSecret: config.syncTokenSecret,
+		accessVerifier: async (claims) => syncAccess.require({
+			vaultId: claims.vaultId,
+			userId: claims.sub,
+			accessVersion: claims.accessVersion ?? 1,
+		}),
 	});
 	const syncTokenService = syncTokenFeature.tokenVerifier;
 	const objectKeyBuilder = { blobObjectKey, blobObjectKeyPrefix };
@@ -108,6 +141,7 @@ export function createCoordinatorApplication(
 		objectKeyBuilder,
 		deps.maintenanceScheduler,
 		healthService,
+		async (vaultId) => !(await sharingAccess.isSuspended(vaultId)),
 	);
 	const blobService = new BlobService(
 		syncTokenService,
@@ -165,6 +199,11 @@ export function createCoordinatorApplication(
 		syncTokenService,
 		vaultService,
 		healthService,
+		(session) => syncAccess.require({
+			vaultId: session.vaultId,
+			userId: session.userId,
+			accessVersion: session.accessVersion ?? 1,
+		}),
 	);
 	const maintenanceService = new MaintenanceService(
 		deps.maintenanceScheduler,
@@ -189,12 +228,27 @@ export function createCoordinatorApplication(
 		services,
 		healthService,
 		connections,
+		undefined,
+		(session) => {
+			syncAccess.require({
+				userId: session.userId,
+				vaultId: session.vaultId,
+				accessVersion: session.accessVersion ?? 1,
+			});
+		},
 	);
 
 	return {
+		authorizeSyncAccess: async (input: VerifiedVaultAccess) =>
+			syncAccess.authorizeVerified(input),
 		app: createCoordinatorApp({
 			services,
 			socketHandshake: deps.socketGateway,
+			authorize: (token, vaultId) =>
+				syncTokenService.verifySyncToken(token, vaultId),
+			refreshSharing: (vaultId) => syncAccess.refresh(vaultId),
+			canApplyPolicy: async (vaultId) =>
+				!(await sharingAccess.isSuspended(vaultId)),
 		}),
 		services,
 		socketMessageHandler,

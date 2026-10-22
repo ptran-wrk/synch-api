@@ -1,3 +1,4 @@
+import { SharingError } from "../../../../sharing/application/types";
 import type {
 	CommitMutationsMessage,
 	CommitMutationsResult,
@@ -59,7 +60,9 @@ export type CoordinatorControlMessageServices = {
 	): Promise<DeletedEntriesPurgeResult>;
 };
 
-export class CoordinatorControlMessageHandler implements CoordinatorSocketMessageHandler {
+export class CoordinatorControlMessageHandler
+	implements CoordinatorSocketMessageHandler
+{
 	constructor(
 		private readonly socketService: Pick<
 			SocketGateway,
@@ -85,6 +88,7 @@ export class CoordinatorControlMessageHandler implements CoordinatorSocketMessag
 			"recordLocalVaultConnection"
 		>,
 		private readonly presenceStore = new PresenceStore(),
+		private readonly authorize?: (session: SocketSession) => void | Promise<void>,
 	) {}
 
 	async handle(
@@ -106,6 +110,42 @@ export class CoordinatorControlMessageHandler implements CoordinatorSocketMessag
 			return;
 		}
 
+		try {
+			const authorization = this.authorize?.(session);
+			if (authorization) await authorization;
+		} catch (error) {
+			const paused = error instanceof SharingError && error.code === "sync_paused";
+			const revoked =
+				error instanceof SharingError && error.code === "vault_access_denied";
+			const suspended =
+				error instanceof SharingError && error.code === "sharing_suspended";
+			this.socketService.sendSocketMessage(connectionId, {
+				type: "session_error",
+				code: paused
+					? "sync_paused"
+					: suspended
+					? "sharing_suspended"
+					: revoked
+						? "unauthorized"
+						: "access_unavailable",
+				message:
+					error instanceof Error
+						? error.message
+						: "Vault access could not be verified",
+			});
+			this.socketService.closeSocket(
+				connectionId,
+				revoked ? 4403 : 1013,
+				paused
+					? "sync paused for vault repair"
+					: suspended
+					? "shared sync paused"
+					: revoked
+						? "vault access denied"
+						: "vault access temporarily unavailable",
+			);
+			return;
+		}
 		if (parsed.type === "hello") {
 			try {
 				const currentCursor = this.vaultStateStore.currentCursor();
